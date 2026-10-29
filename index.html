@@ -18,27 +18,60 @@
 <body>
   <header class="top">
     <h1 id="pageTitle">지금 하는 일</h1>
-    <span id="todayTotal" class="today-total"></span>
+    <span class="top-right"><span id="todayTotal" class="today-total"></span><span id="syncDot" class="sync-dot" hidden></span></span>
   </header>
 
   <main>
     <!-- 기록 탭 -->
     <section id="tab-now" class="tab active">
+      <div class="card core" id="coreCard">
+        <button class="core-head" id="coreToggle" aria-expanded="false" aria-controls="coreBody">
+          <span class="core-main">
+            <span class="core-k">나의 추천 코어타임</span>
+            <span class="core-time" id="coreTime">–</span>
+            <span class="core-sub" id="coreSub"></span>
+          </span>
+          <span class="chev" aria-hidden="true">⌄</span>
+        </button>
+        <div class="core-body" id="coreBody" hidden>
+          <div id="coreChart"></div>
+          <ul class="core-facts" id="coreFacts"></ul>
+          <div class="core-opts">
+            <div class="opt"><span>기준</span><div class="mini-seg" data-opt="basis"><button data-v="core">핵심 작업</button><button data-v="all">전체 작업</button></div></div>
+            <div class="opt"><span>길이</span><div class="mini-seg" data-opt="len"><button data-v="4">2시간</button><button data-v="6">3시간</button><button data-v="8">4시간</button></div></div>
+            <div class="opt"><span>기간</span><div class="mini-seg" data-opt="days"><button data-v="14">2주</button><button data-v="28">4주</button><button data-v="0">전체</button></div></div>
+          </div>
+        </div>
+      </div>
+
       <div class="card start">
-        <h2>새 작업 시작</h2>
+        <h2>새 작업 추가</h2>
         <div id="catChips" class="chips" role="radiogroup" aria-label="분류"></div>
         <div class="start-row">
           <input id="taskTitle" list="titleList" placeholder="무슨 일인가요? (비워도 돼요)" autocomplete="off">
           <datalist id="titleList"></datalist>
-          <button id="startBtn" class="btn primary">시작</button>
+          <button id="startBtn" class="btn primary">추가</button>
         </div>
         <div id="recentWrap" hidden>
-          <p class="label">최근 작업 바로 시작</p>
+          <p class="label">최근 작업 다시 추가</p>
           <div id="recentChips" class="chips small"></div>
         </div>
       </div>
 
-      <h2 class="sec">진행 중 <span id="runCount" class="muted"></span></h2>
+      <div class="sec-row">
+        <h2 class="sec">할 일 <span id="runCount" class="muted"></span></h2>
+        <button id="breakBtn" class="btn sm">☕ 휴식</button>
+      </div>
+      <div id="breakCard" class="card break" hidden>
+        <div class="break-row">
+          <div>
+            <div class="break-k">☕ 휴식 중</div>
+            <div class="timer" id="breakTimer">00:00:00</div>
+            <div class="since" id="breakSince"></div>
+          </div>
+          <button id="breakEnd" class="btn primary">휴식 끝</button>
+        </div>
+      </div>
       <div id="runningList"></div>
 
       <div class="sec-row">
@@ -87,6 +120,11 @@
 
     <!-- 설정 탭 -->
     <section id="tab-settings" class="tab">
+      <div class="card" id="syncCard">
+        <h3>기기 간 동기화</h3>
+        <p class="hint" id="syncHint"></p>
+        <div class="btn-col" id="syncActions"></div>
+      </div>
       <div class="card">
         <h3>분류 & 주간 목표</h3>
         <p class="hint">주간 목표 시간을 정하면 통계에서 얼마나 더 해야 하는지 알려줘요. <b>핵심</b>은 본업(제작 등)으로 볼 분류예요.</p>
@@ -95,7 +133,7 @@
       </div>
       <div class="card">
         <h3>데이터</h3>
-        <p class="hint">기록은 이 기기의 브라우저에만 저장돼요. 휴대폰과 PC는 따로 저장되니, 가끔 백업해두세요.</p>
+        <p class="hint">기록은 이 기기에도 저장돼요. 동기화를 안 쓴다면 가끔 백업해두세요.</p>
         <div class="btn-col">
           <button id="exportJson" class="btn">백업 파일 저장 (JSON)</button>
           <label class="btn">백업 불러오기<input id="importJson" type="file" accept="application/json,.json" hidden></label>
@@ -135,6 +173,9 @@
   <div id="tip" class="tip" hidden></div>
   <div id="toast" class="toast" role="status"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
   <script src="app.js"></script>
+  <script src="sync.js"></script>
 </body>
 </html>

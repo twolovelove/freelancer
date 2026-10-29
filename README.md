@@ -24,10 +24,27 @@ python3 -m http.server 8000
 # http://localhost:8000
 ```
 
-## 데이터 저장
+## 데이터 저장 & 동기화
 
-기록은 브라우저의 `localStorage`에만 저장돼요. 휴대폰과 PC의 데이터는 서로 공유되지 않으니, **설정 → 백업 파일 저장**으로 가끔 백업해두세요.
-(브라우저 데이터를 지우면 기록도 사라져요.)
+기록은 항상 이 기기의 브라우저(`localStorage`)에 먼저 저장돼요. Supabase를 연결하고 Google로 로그인하면 맥북·휴대폰 기록이 자동으로 합쳐져요. (앱을 열 때, 기록을 바꿀 때, 1분마다)
+
+### Supabase + Google 로그인 설정 (처음 한 번)
+
+1. **테이블 만들기**: Supabase 대시보드 → SQL Editor → [`supabase/schema.sql`](supabase/schema.sql) 붙여넣고 Run
+2. **Google OAuth 클라이언트 만들기**: [Google Cloud Console](https://console.cloud.google.com/)
+   - 새 프로젝트 → *API 및 서비스 → OAuth 동의 화면*: External, 앱 이름·이메일 입력, 테스트 사용자에 내 Gmail 추가
+   - *사용자 인증 정보 → 사용자 인증 정보 만들기 → OAuth 클라이언트 ID* → 유형 **웹 애플리케이션**
+   - **승인된 리디렉션 URI**: `https://<프로젝트ID>.supabase.co/auth/v1/callback`
+   - 만들어진 **클라이언트 ID / 보안 비밀** 복사
+3. **Supabase에 Google 연결**: Authentication → Sign In / Providers → Google → 켜고 클라이언트 ID·보안 비밀 붙여넣기 → Save
+4. **돌아올 주소 허용**: Authentication → URL Configuration
+   - Site URL: `http://localhost:8000` (배포 후 Netlify 주소로 변경)
+   - Redirect URLs: `http://localhost:8000/**`, 휴대폰 테스트용 `http://<맥 IP>:8000/**`, 배포 후 `https://<사이트>.netlify.app/**`
+5. **[`config.js`](config.js)** 에 Project URL과 anon(public) 키 입력 (Project Settings → API). `service_role` 키는 절대 넣지 마세요.
+6. 맥북·휴대폰에서 각각 **설정 → Google로 로그인**
+7. 다 로그인했으면 Authentication → Sign In / Providers에서 **Allow new users to sign up** 끄기 (다른 사람이 계정을 못 만들게)
+
+데이터는 행 단위 보안(RLS)으로 로그인한 본인만 읽고 쓸 수 있어요.
 
 ## 배포 (Netlify)
 

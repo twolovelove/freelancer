@@ -39,48 +39,87 @@ function defaultState() {
     categories: DEFAULT_CATS.map(([name, core], i) => ({ id: 'c' + i, name, slot: i, goal: 0, core })),
     running: [],
     records: [],
+    breaks: [],
+    onBreak: null,
+    corePrefs: { basis: 'core', len: 6, days: 28 },
   };
+}
+function migrate(s) {
+  s.breaks ||= [];
+  s.onBreak ??= null;
+  s.corePrefs ||= { basis: 'core', len: 6, days: 28 };
+  return s;
 }
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && Array.isArray(s.categories) && Array.isArray(s.records) && Array.isArray(s.running)) return s;
+    if (s && Array.isArray(s.categories) && Array.isArray(s.records) && Array.isArray(s.running)) return migrate(s);
   } catch (e) { /* 손상된 데이터면 새로 시작 */ }
   return defaultState();
 }
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { toast('저장에 실패했어요. 백업을 먼저 해두세요!'); }
+  window.Sync?.schedule();
 }
 
 let state = load();
-const ui = { tab: 'now', selCat: state.categories[0]?.id, period: 'week', anchor: new Date(), editing: null };
+const ui = { tab: 'now', selCat: state.categories[0]?.id, period: 'week', anchor: new Date(), editing: null, coreOpen: false };
 
 const catById = id => state.categories.find(c => c.id === id) || { id, name: '(삭제된 분류)', slot: 7, goal: 0, core: false };
 const catColor = id => `var(--c${catById(id).slot})`;
 const segDur = (segs, upTo = Date.now()) => segs.reduce((a, s) => a + ((s.end ?? upTo) - s.start), 0);
-const isLive = r => r.segments.at(-1).end == null;
+const isLive = r => r.segments.length > 0 && r.segments.at(-1).end == null;
+const isPending = r => r.segments.length === 0;
 
 /* ───────── 작업 동작 ───────── */
-function startTask(catId, title) {
+function addTask(catId, title) {
   const cat = catById(catId);
-  state.running.unshift({ id: uid(), catId, title: title?.trim() || cat.name, memo: '', segments: [{ start: Date.now(), end: null }] });
+  const t = title?.trim() || cat.name;
+  state.running.unshift({ id: uid(), catId, title: t, memo: '', segments: [] });
   save();
   renderNow();
-  toast(`${cat.name} 시작!`);
+  toast(`'${t}' 추가했어요. 준비되면 시작을 눌러주세요`);
 }
 function togglePause(id) {
   const r = state.running.find(x => x.id === id);
   if (!r) return;
   if (isLive(r)) r.segments.at(-1).end = Date.now();
-  else r.segments.push({ start: Date.now(), end: null });
+  else {
+    if (state.onBreak) endBreak(false);
+    r.segments.push({ start: Date.now(), end: null });
+  }
   save();
   renderNow();
 }
+
+// 휴식: 진행 중인 작업을 모두 멈추고, 끝나면 멈췄던 작업만 다시 이어감
+function startBreak() {
+  const t = Date.now();
+  const paused = state.running.filter(isLive).map(r => { r.segments.at(-1).end = t; return r.id; });
+  state.onBreak = { start: t, paused };
+  save();
+  renderNow();
+}
+function endBreak(resume = true) {
+  const b = state.onBreak;
+  if (!b) return;
+  const t = Date.now();
+  state.breaks.push({ start: b.start, end: t });
+  if (resume) for (const r of state.running) if (b.paused.includes(r.id)) r.segments.push({ start: t, end: null });
+  state.onBreak = null;
+  save();
+  renderNow();
+  toast(`휴식 ${fmtDur(t - b.start)} 기록했어요`);
+}
+const allBreaks = () => state.onBreak ? [...state.breaks, { start: state.onBreak.start, end: Date.now() }] : state.breaks;
+const breakMs = (from, to) => allBreaks().reduce((a, b) => a + overlap(b.start, b.end, from, to), 0);
+
 function finishTask(id) {
   const i = state.running.findIndex(x => x.id === id);
   if (i < 0) return;
   const r = state.running[i];
+  if (isPending(r)) return;
   if (isLive(r)) r.segments.at(-1).end = Date.now();
   const rec = { id: r.id, catId: r.catId, title: r.title, memo: r.memo, segments: r.segments, start: r.segments[0].start, end: r.segments.at(-1).end };
   state.running.splice(i, 1);
@@ -90,7 +129,8 @@ function finishTask(id) {
   toast(`${rec.title} · ${fmtDur(segDur(rec.segments))} 기록했어요`);
 }
 function cancelTask(id) {
-  if (!confirm('이 작업을 기록하지 않고 취소할까요?')) return;
+  const r = state.running.find(x => x.id === id);
+  if (r && !isPending(r) && !confirm('이 작업을 기록하지 않고 취소할까요?')) return;
   state.running = state.running.filter(x => x.id !== id);
   save();
   renderNow();
@@ -105,17 +145,19 @@ function allIntervals() {
 }
 const overlap = (a0, a1, b0, b1) => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
 
-// 동시에 한 일은 한 번만 세는 "실제 일한 시간"
-function unionMs(ivs, from, to) {
+// 겹치는 구간을 합쳐서 [시작, 끝] 목록으로
+function mergeIvs(ivs, from, to) {
   const parts = ivs.map(i => [Math.max(i.start, from), Math.min(i.end, to)]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
-  let total = 0, cs = null, ce = null;
+  const out = [];
   for (const [a, b] of parts) {
-    if (ce === null || a > ce) { if (ce !== null) total += ce - cs; cs = a; ce = b; }
-    else ce = Math.max(ce, b);
+    const last = out.at(-1);
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
   }
-  if (ce !== null) total += ce - cs;
-  return total;
+  return out;
 }
+// 동시에 한 일은 한 번만 세는 "실제 일한 시간"
+const unionMs = (ivs, from, to) => mergeIvs(ivs, from, to).reduce((a, [s, e]) => a + e - s, 0);
 function summarize(from, to, ivs = allIntervals()) {
   const byCat = {}, recs = new Set();
   let total = 0;
@@ -150,6 +192,121 @@ function periodLabel(type, { from, to }) {
   return `${f.getFullYear()}년 ${f.getMonth() + 1}월`;
 }
 
+/* ───────── 코어타임 ───────── */
+const SLOT = 30 * 60000, SLOTS = 48, MIN_DAYS = 3;
+const slotLabel = s => `${pad(Math.floor((s % SLOTS) / 2))}:${s % 2 ? '30' : '00'}`;
+
+// 최근 기록을 30분 칸으로 나눠, 하루 중 가장 꾸준히 몰입한 연속 구간을 찾음
+function coreAnalysis({ basis, len, days }) {
+  const end = +startOfDay(Date.now()) + 86400000;
+  const coreIds = new Set(state.categories.filter(c => c.core).map(c => c.id));
+  const all = allIntervals();
+  const from = days ? end - days * 86400000 : +startOfDay(all.length ? Math.min(...all.map(i => i.start)) : end);
+  const useCore = basis === 'core' && coreIds.size > 0;
+  const ivs = useCore ? all.filter(i => coreIds.has(i.cat)) : all;
+
+  const perDay = new Map(); // 날짜 → 칸별 작업 ms
+  for (const [a, b] of mergeIvs(ivs, from, end)) {
+    for (let t = a; t < b;) {
+      const day = +startOfDay(t), slot = Math.floor((t - day) / SLOT), next = Math.min(b, day + (slot + 1) * SLOT);
+      if (!perDay.has(day)) perDay.set(day, Array(SLOTS).fill(0));
+      perDay.get(day)[slot] += next - t;
+      t = next;
+    }
+  }
+  const activeDays = perDay.size;
+  const avg = Array(SLOTS).fill(0);
+  for (const arr of perDay.values()) arr.forEach((v, i) => { avg[i] += v / activeDays; });
+
+  const sumAt = (arr, s) => { let x = 0; for (let k = 0; k < len; k++) x += arr[(s + k) % SLOTS]; return x; };
+  const pick = skip => {
+    let best = { start: 0, sum: -1 };
+    for (let s = 0; s < SLOTS; s++) if (!skip?.(s)) { const v = sumAt(avg, s); if (v > best.sum) best = { start: s, sum: v }; }
+    return best;
+  };
+  const main = pick();
+  const overlapsMain = s => (s - main.start + SLOTS) % SLOTS < len || (main.start - s + SLOTS) % SLOTS < len;
+  const second = pick(overlapsMain);
+
+  // 일한 날 중 추천 구간의 1/3 이상을 일한 날의 비율
+  let hit = 0;
+  for (const arr of perDay.values()) if (sumAt(arr, main.start) >= (len * SLOT) / 3) hit++;
+
+  // 추천 구간에 실제로 한 일 & 휴식
+  const mix = {};
+  let rest = 0;
+  for (const day of perDay.keys()) {
+    const w0 = day + main.start * SLOT, w1 = w0 + len * SLOT;
+    for (const i of all) { const o = overlap(i.start, i.end, w0, w1); if (o > 0) mix[i.cat] = (mix[i.cat] || 0) + o; }
+    rest += breakMs(w0, w1);
+  }
+
+  return {
+    activeDays, avg, main, useCore,
+    second: second.sum > main.sum * 0.35 ? second : null,
+    consistency: activeDays ? hit / activeDays : 0,
+    mix, restPerDay: activeDays ? rest / activeDays : 0,
+  };
+}
+
+function renderCore() {
+  const p = state.corePrefs, len = p.len;
+  $$('.core-opts .mini-seg').forEach(seg => $$('button', seg).forEach(b => b.classList.toggle('active', String(p[seg.dataset.opt]) === b.dataset.v)));
+  $('#coreToggle').setAttribute('aria-expanded', ui.coreOpen);
+  $('#coreBody').hidden = !ui.coreOpen;
+  $('#coreCard').classList.toggle('open', ui.coreOpen);
+
+  const a = coreAnalysis(p);
+  const ready = a.activeDays >= MIN_DAYS;
+  const { start } = a.main;
+  const nowMin = (Date.now() - +startOfDay(Date.now())) / 60000;
+
+  if (!ready) {
+    $('#coreTime').textContent = '데이터 모으는 중';
+    $('#coreSub').textContent = `${p.basis === 'core' ? '핵심 작업' : '작업'} 기록이 ${MIN_DAYS}일 이상 쌓이면 추천해드려요 (${a.activeDays}/${MIN_DAYS}일)`;
+  } else {
+    $('#coreTime').textContent = `${slotLabel(start)} – ${slotLabel(start + len)}`;
+    const into = (nowMin - start * 30 + 1440) % 1440;
+    $('#coreSub').innerHTML = into < len * 30
+      ? `<b class="now-badge">지금이 코어타임</b> ${fmtDur((len * 30 - into) * 60000)} 남았어요`
+      : `다음 코어타임까지 ${fmtDur((1440 - into) * 60000)}`;
+  }
+  if (!ui.coreOpen) return;
+
+  // 하루 24시간 집중도 막대 (추천 구간은 강조)
+  const max = Math.max(...a.avg, 1);
+  const nowPct = (nowMin / 1440) * 100;
+  const bars = a.avg.map((v, i) => {
+    const inWin = ready && (i - start + SLOTS) % SLOTS < len;
+    const tip = `${slotLabel(i)}–${slotLabel(i + 1)}\n하루 평균 ${v ? fmtDur(v) : '0분'}${inWin ? '\n★ 추천 코어타임' : ''}`;
+    return `<div class="cb ${inWin ? 'in' : ''}" data-tip="${esc(tip)}">${v ? `<i style="height:${(v / max) * 100}%"></i>` : ''}</div>`;
+  }).join('');
+  $('#coreChart').innerHTML = `<div class="core-bars">${bars}<span class="now-line" style="left:${nowPct}%" title="지금"></span></div>
+    <div class="core-axis"><span>0시</span><span>6시</span><span>12시</span><span>18시</span><span>24시</span></div>`;
+
+  const facts = [];
+  const periodText = p.days ? `최근 ${p.days / 7}주` : '전체 기간';
+  if (!ready) {
+    facts.push(['🌱', `${periodText} 동안 ${a.activeDays}일의 기록이 있어요. 며칠만 더 기록하면 나에게 맞는 코어타임을 찾아드릴게요.`]);
+  } else {
+    const what = a.useCore ? '핵심 작업' : '작업';
+    facts.push(['📊', `${periodText} 중 ${what}을 한 <b>${a.activeDays}일</b>을 분석했어요.`]);
+    facts.push(['⏱', `이 시간대에 하루 평균 <b>${fmtDur(a.main.sum)}</b> ${what}을 했어요 (구간의 ${Math.round((a.main.sum / (len * SLOT)) * 100)}%).`]);
+    const c = Math.round(a.consistency * 100);
+    facts.push([c >= 60 ? '✅' : '🔄', c >= 60
+      ? `일한 날의 <b>${c}%</b>가 이 시간대에 꾸준히 일했어요. 이미 리듬이 잡혀 있어요.`
+      : `일한 날 중 <b>${c}%</b>만 이 시간대에 일했어요. 아직 들쭉날쭉하니 이 시간을 고정해보세요.`]);
+    const mixTotal = Object.values(a.mix).reduce((x, y) => x + y, 0);
+    const topMix = Object.entries(a.mix).sort((x, y) => y[1] - x[1]).slice(0, 3);
+    if (mixTotal) facts.push(['🧩', `이 시간에 주로 한 일: ${topMix.map(([id, ms]) => `${esc(catById(id).name)} ${Math.round((ms / mixTotal) * 100)}%`).join(', ')}`]);
+    if (a.restPerDay >= 60000) facts.push(['☕', `이 시간대 휴식은 하루 평균 ${fmtDur(a.restPerDay)}이에요.`]);
+    if (a.second) facts.push(['🌙', `보조 집중 시간: <b>${slotLabel(a.second.start)} – ${slotLabel(a.second.start + len)}</b> (하루 평균 ${fmtDur(a.second.sum)})`]);
+    if (a.useCore) facts.push(['💡', `코어타임엔 서류·연락은 미뤄두고 ${esc(state.categories.filter(c => c.core).map(c => c.name).join('·'))}에 집중해보세요.`]);
+    else if (p.basis === 'core') facts.push(['ℹ️', '설정에서 핵심 작업으로 지정한 분류가 없어서 전체 작업 기준으로 계산했어요.']);
+  }
+  $('#coreFacts').innerHTML = facts.map(([ic, t]) => `<li><span class="ic">${ic}</span><span>${t}</span></li>`).join('');
+}
+
 /* ───────── 렌더: 기록 탭 ───────── */
 function renderCatChips() {
   $('#catChips').innerHTML = state.categories.map(c =>
@@ -173,20 +330,34 @@ function renderCatChips() {
 
 function renderRunning() {
   const list = state.running;
-  $('#runCount').textContent = list.length ? list.length + '개' : '';
-  if (!list.length) { $('#runningList').innerHTML = '<p class="empty">진행 중인 작업이 없어요. 위에서 시작해보세요!</p>'; return; }
+  const liveN = list.filter(isLive).length, pendingN = list.filter(isPending).length;
+  $('#runCount').textContent = list.length ? [liveN && `진행 ${liveN}`, list.length - liveN - pendingN && `멈춤 ${list.length - liveN - pendingN}`, pendingN && `대기 ${pendingN}`].filter(Boolean).join(' · ') : '';
+
+  const b = state.onBreak;
+  $('#breakBtn').hidden = !!b;
+  $('#breakCard').hidden = !b;
+  if (b) {
+    $('#breakTimer').textContent = fmtClock(Date.now() - b.start);
+    $('#breakSince').textContent = `${fmtTime(b.start)}부터 휴식 중${b.paused.length ? ` · 끝나면 작업 ${b.paused.length}개를 다시 이어서 해요` : ''}`;
+  }
+
+  if (!list.length) { $('#runningList').innerHTML = '<p class="empty">할 일이 없어요. 위에서 추가해보세요!</p>'; return; }
   $('#runningList').innerHTML = list.map(r => {
-    const live = isLive(r), cat = catById(r.catId);
-    return `<div class="card run ${live ? '' : 'paused'}" data-id="${r.id}" style="--cat:var(--c${cat.slot})">
-      <div class="run-head"><span class="dot"></span>${esc(cat.name)}<span class="state ${live ? 'live' : ''}">${live ? '진행 중' : '일시정지'}</span></div>
+    const live = isLive(r), pending = isPending(r), cat = catById(r.catId);
+    const stateText = pending ? '대기' : live ? '진행 중' : '일시정지';
+    const actions = pending
+      ? `<button class="btn primary" data-act="pause">▶ 시작</button>`
+      : `<button class="btn" data-act="pause">${live ? '일시정지' : '다시 시작'}</button>
+         <button class="btn primary" data-act="finish">완료</button>`;
+    return `<div class="card run ${live ? '' : 'paused'} ${pending ? 'pending' : ''}" data-id="${r.id}" style="--cat:var(--c${cat.slot})">
+      <div class="run-head"><span class="dot"></span>${esc(cat.name)}<span class="state ${live ? 'live' : ''}">${stateText}</span></div>
       <input class="run-title" data-title-of="${r.id}" value="${esc(r.title)}" aria-label="작업 이름">
       <div class="timer" data-timer="${r.id}">${fmtClock(segDur(r.segments))}</div>
-      <div class="since">${fmtTime(r.segments[0].start)} 시작${r.segments.length > 1 ? ` · 쉬는 시간 제외` : ''}</div>
+      <div class="since">${pending ? '아직 시작 전' : `${fmtTime(r.segments[0].start)} 시작${r.segments.length > 1 ? ' · 쉬는 시간 제외' : ''}`}</div>
       <textarea data-memo-of="${r.id}" rows="2" placeholder="메모 (예: 키링 20개 조립, 부가세 자료 정리)">${esc(r.memo)}</textarea>
       <div class="run-actions">
-        <button class="btn" data-act="pause">${live ? '일시정지' : '다시 시작'}</button>
-        <button class="btn primary" data-act="finish">완료</button>
-        <button class="btn ghost" data-act="cancel" aria-label="취소">✕</button>
+        ${actions}
+        <button class="btn ghost" data-act="cancel" aria-label="${pending ? '삭제' : '취소'}">✕</button>
       </div>
     </div>`;
   }).join('');
@@ -204,13 +375,14 @@ function recordItem(r, showDate = false) {
 function renderToday() {
   const from = +startOfDay(Date.now()), to = from + 86400000;
   const recs = state.records.filter(r => r.end > from && r.start < to).sort((a, b) => b.end - a.end);
-  const s = summarize(from, to);
-  $('#todayTotal').textContent = s.actual ? `오늘 ${fmtDur(s.actual)}` : '';
+  const s = summarize(from, to), rest = breakMs(from, to);
+  $('#todayTotal').textContent = [s.actual && `오늘 ${fmtDur(s.actual)}`, rest && `휴식 ${fmtDur(rest)}`].filter(Boolean).join(' · ');
   $('#doneTotal').textContent = recs.length ? `${recs.length}건` : '';
   $('#todayList').innerHTML = recs.length ? recs.map(r => recordItem(r)).join('') : '<p class="empty">아직 완료한 작업이 없어요.</p>';
 }
 
 function renderNow() {
+  renderCore();
   renderCatChips();
   renderRunning();
   renderToday();
@@ -338,6 +510,12 @@ function renderInsights(type, range, sum, prev, rows, ivs) {
       .sort((a, b) => ((sum.byCat[b.id] || 0) - (prev.byCat[b.id] || 0)) - ((sum.byCat[a.id] || 0) - (prev.byCat[a.id] || 0)))[0];
     if (grown) out.push(['⚠️', `<b>${esc(grown.name)}</b>에 ${unit}보다 ${fmtDur((sum.byCat[grown.id] || 0) - (prev.byCat[grown.id] || 0))} 더 썼어요.`]);
 
+    const rest = breakMs(range.from, range.to);
+    if (rest >= 60000) {
+      const perHour = Math.round((rest / sum.actual) * 60);
+      out.push(['☕', `휴식은 ${fmtDur(rest)}, 작업 1시간당 ${perHour}분 쉬었어요.${perHour < 5 && sum.actual >= 3 * 3600000 ? ' 조금 더 쉬어가도 괜찮아요.' : ''}`]);
+    }
+
     if (sum.total - sum.actual >= 60000) out.push(['🔀', `여러 일을 동시에 진행한 시간이 <b>${fmtDur(sum.total - sum.actual)}</b>이에요. (작업별 누적 ${fmtDur(sum.total)} / 실제 ${fmtDur(sum.actual)})`]);
 
     if (type !== 'day') {
@@ -355,7 +533,7 @@ function renderInsights(type, range, sum, prev, rows, ivs) {
     }
     let best = 0, bestH = 0;
     for (let h = 0; h < 24; h++) { const v = hours[h] + hours[(h + 1) % 24]; if (v > best) { best = v; bestH = h; } }
-    if (best) out.push(['⏰', `가장 집중해서 일한 시간대는 <b>${bestH}시–${(bestH + 2) % 24}시</b>예요.`]);
+    if (best) out.push(['⏰', `이 기간에 가장 많이 일한 시간대는 <b>${bestH}시–${(bestH + 2) % 24}시</b>예요. (기록 탭 맨 위에서 추천 코어타임을 확인해보세요)`]);
   }
 
   // 목표
@@ -409,9 +587,10 @@ function renderStats() {
   const core = state.categories.filter(c => c.core);
   const coreMs = core.reduce((a, c) => a + (sum.byCat[c.id] || 0), 0);
   const activeDays = type === 'day' ? 1 : buckets(type, range.from, range.to).filter(b => unionMs(ivs, b.from, b.to) > 0).length;
+  const rest = breakMs(range.from, range.to);
   const tiles = [
-    ['실제 작업 시간', fmtDur(sum.actual) || '0분', '동시 작업은 한 번만'],
-    ['작업별 누적', fmtDur(sum.total) || '0분', '동시 작업 모두 합산'],
+    ['실제 작업 시간', fmtDur(sum.actual), sum.total > sum.actual ? `동시 작업 합산 시 ${fmtDur(sum.total)}` : '동시 작업은 한 번만'],
+    ['휴식', fmtDur(rest), sum.actual && rest ? `작업 1시간당 ${Math.round((rest / sum.actual) * 60)}분` : '☕ 휴식 버튼으로 기록'],
     ['완료 작업', `${sum.count}건`, type === 'day' ? '' : `${activeDays}일 일함`],
     type === 'day'
       ? ['핵심 작업 비중', sum.total ? `${Math.round((coreMs / sum.total) * 100)}%` : '–', core.map(c => c.name).join('·')]
@@ -489,6 +668,10 @@ function exportCsv() {
     const d = new Date(r.start);
     rows.push([`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`, catById(r.catId).name, r.title, fmtTime(r.start), fmtTime(r.end), Math.round(segDur(r.segments) / 60000), r.memo]);
   }
+  for (const b of state.breaks) {
+    const d = new Date(b.start);
+    rows.push([`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`, '휴식', '휴식', fmtTime(b.start), fmtTime(b.end), Math.round((b.end - b.start) / 60000), '']);
+  }
   download(`작업기록_${stamp()}.csv`, '﻿' + rows.map(r => r.map(q).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 
@@ -499,7 +682,7 @@ function importJson(file) {
       const s = JSON.parse(reader.result);
       if (!Array.isArray(s.categories) || !Array.isArray(s.records) || !Array.isArray(s.running)) throw new Error('형식 오류');
       if (!confirm(`기록 ${s.records.length}건을 불러올까요? 지금 기기의 기록은 덮어써져요.`)) return;
-      state = s;
+      state = migrate(s);
       ui.selCat = state.categories[0]?.id;
       save();
       renderAll();
@@ -546,13 +729,25 @@ $('#catChips').addEventListener('click', e => {
 });
 $('#startBtn').addEventListener('click', () => {
   if (!ui.selCat) return toast('분류를 먼저 골라주세요');
-  startTask(ui.selCat, $('#taskTitle').value);
+  addTask(ui.selCat, $('#taskTitle').value);
   $('#taskTitle').value = '';
 });
 $('#taskTitle').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) $('#startBtn').click(); });
 $('#recentChips').addEventListener('click', e => {
   const b = e.target.closest('[data-quick]');
-  if (b) startTask(b.dataset.quick, b.dataset.title);
+  if (b) addTask(b.dataset.quick, b.dataset.title);
+});
+$('#breakBtn').addEventListener('click', startBreak);
+$('#breakEnd').addEventListener('click', () => endBreak());
+
+$('#coreToggle').addEventListener('click', () => { ui.coreOpen = !ui.coreOpen; renderCore(); });
+$('.core-opts').addEventListener('click', e => {
+  const b = e.target.closest('[data-v]');
+  if (!b) return;
+  const opt = b.parentElement.dataset.opt;
+  state.corePrefs[opt] = opt === 'basis' ? b.dataset.v : Number(b.dataset.v);
+  save();
+  renderCore();
 });
 
 $('#runningList').addEventListener('click', e => {
@@ -638,7 +833,7 @@ $('#exportJson').addEventListener('click', () => download(`작업기록_백업_$
 $('#importJson').addEventListener('change', e => { if (e.target.files[0]) importJson(e.target.files[0]); e.target.value = ''; });
 $('#exportCsv').addEventListener('click', exportCsv);
 $('#resetAll').addEventListener('click', () => {
-  if (!confirm('모든 기록과 설정을 삭제할까요? 되돌릴 수 없어요.')) return;
+  if (!confirm('모든 기록과 설정을 삭제할까요? 되돌릴 수 없어요. (동기화 중이면 다른 기기에서도 삭제돼요)')) return;
   if (!confirm('정말 삭제할까요? 백업은 해두셨나요?')) return;
   state = defaultState();
   ui.selCat = state.categories[0].id;
@@ -674,9 +869,13 @@ setInterval(() => {
     const r = state.running.find(x => x.id === el.dataset.timer);
     if (r) el.textContent = fmtClock(segDur(r.segments));
   }
-  if (++tickCount % 30 === 0 && state.running.some(isLive)) {
-    renderToday();
-    if (ui.tab === 'stats' && !document.querySelector('#editDlg[open]')) renderStats();
+  if (state.onBreak) $('#breakTimer').textContent = fmtClock(Date.now() - state.onBreak.start);
+  if (++tickCount % 30 === 0) {
+    if (ui.tab === 'now') renderCore();
+    if (state.running.some(isLive) || state.onBreak) {
+      renderToday();
+      if (ui.tab === 'stats' && !document.querySelector('#editDlg[open]')) renderStats();
+    }
   }
 }, 1000);
 
