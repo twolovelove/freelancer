@@ -1,0 +1,10 @@
+{
+  "name": "작업 기록",
+  "short_name": "작업 기록",
+  "description": "프리랜서 작업 시간 기록 & 분석",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f3f0",
+  "theme_color": "#2a78d6",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
